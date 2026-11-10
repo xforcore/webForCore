@@ -157,7 +157,8 @@ namespace IISGate
             stop.Cancel();
             await Task.WhenAll(load);
             Assert.True(answered > 10, $"{answered} requests");
-            Assert.True(others.IsEmpty, $"{others.Count} of {answered} requests weren't answered 200:\n{string.Join("\n", others)}\nThe host's output:\n{OutputTail()}");
+            if (!others.IsEmpty) File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "recycling-host-output.txt"), _server.Output);
+            Assert.True(others.IsEmpty, $"{others.Count} of {answered} requests weren't answered 200:\n{string.Join("\n", others)}\nThe host's messages about workers:\n{WorkerMessages()}");
         }
 
         // A WebSocket open across a restart is aborted once the application's registered objects have stopped, without
@@ -281,6 +282,22 @@ namespace IISGate
         {
             var output = _server.Output;
             return output.Length > 20000 ? output[^20000..] : output;
+        }
+
+        // The host's and workers' messages about workers and the application (not the requests they log), with the
+        // lines of each message.
+        private string WorkerMessages()
+        {
+            var lines = _server.Output.Split('\n');
+            var kept = new List<string>();
+            for (int i = 0; i < lines.Length; i++)
+                if (Regex.IsMatch(lines[i], "orker|pplication|xited|fail:|warn:"))
+                {
+                    kept.Add(lines[i]);
+                    if (i + 1 < lines.Length && lines[i + 1].StartsWith("      ")) kept.Add(lines[++i]);
+                }
+            var text = string.Join("\n", kept);
+            return text.Length > 20000 ? text[^20000..] : text;
         }
 
         // #89: an App_Code change while the old worker still compiles a page (Umbraco 6.2.6's install: its Application_Start

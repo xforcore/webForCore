@@ -464,7 +464,8 @@ sealed class WorkerPool : IHostedLifecycleService, IDisposable
 		// Only the host says where a request came from.
 		foreach (var header in WorkerProtocol.RequestHeaders) context.Request.Headers.Remove(header);
 		// A request can be sent again to the next worker if one that is shutting down didn't take it, its body too (#214).
-		var body = RequestBody.For(context);
+		var body = await RequestBody.ForAsync(context);
+		if (body == null) return; // the client went away while it sent the body
 		for (int attempt = 0; ; attempt++)
 		{
 			var (worker, remap) = await GetReadyWorkerAsync(context.RequestAborted);
@@ -479,6 +480,7 @@ sealed class WorkerPool : IHostedLifecycleService, IDisposable
 				if (!context.RequestAborted.IsCancellationRequested) await ServiceUnavailableAsync(context);
 				return;
 			}
+			body.Rewind();
 			var transformer = new WorkerTransformer(attempt < MaxRetries, body);
 			ForwarderError error;
 			try
@@ -495,7 +497,6 @@ sealed class WorkerPool : IHostedLifecycleService, IDisposable
 				// forwarder has already set the worker's 503 on the response (and won't forward into a response that isn't a
 				// fresh 200): clear it first.
 				context.Response.Clear();
-				body.Rewind();
 				try { await Task.Delay(RetryDelay, context.RequestAborted); }
 				catch (OperationCanceledException) { return; }
 				continue;
@@ -503,10 +504,13 @@ sealed class WorkerPool : IHostedLifecycleService, IDisposable
 			if (error != ForwarderError.None && !context.Response.HasStarted && !context.RequestAborted.IsCancellationRequested)
 			{
 				var exception = context.Features.Get<IForwarderErrorFeature>()?.Exception;
-				if (body.Unread && attempt < MaxRetries && await HasEndedAsync(worker))
+				if (attempt < MaxRetries && (body.Unread ? await HasEndedAsync(worker) : body.CanSendAgain && await StoppedAfterDrainAsync(worker)))
 				{
 					// The worker's process ended (a crash, Environment.Exit) without answering: the request goes to the next
-					// worker, as one queued for a w3wp that died does on IIS.
+					// worker, as one queued for a w3wp that died does on IIS. With a body a worker may have read, only when the
+					// worker was retiring and stopped by itself: its application had finished the requests it took, and this
+					// one was still waiting on its connection when the worker's Kestrel closed the connections it had no request
+					// from yet (#214).
 					logger.LogInformation("Worker {Id} ended without answering {Method} {Path}: sending it to the next worker.", worker.Id, context.Request.Method, context.Request.Path);
 					context.Response.Clear();
 					try { await Task.Delay(RetryDelay, context.RequestAborted); }
@@ -537,6 +541,15 @@ sealed class WorkerPool : IHostedLifecycleService, IDisposable
 	{
 		if (worker.State == WorkerState.Retiring) return true;
 		return await Task.WhenAny(worker.Exited, Task.Delay(TimeSpan.FromSeconds(1))) == worker.Exited;
+	}
+
+	// Whether a retiring worker stopped by itself (exit code 0, not killed) after its application had drained: then a
+	// request it dropped without an answer never reached the application (#214).
+	static async Task<bool> StoppedAfterDrainAsync(Worker worker)
+	{
+		if (worker.State != WorkerState.Retiring) return false;
+		if (await Task.WhenAny(worker.Exited, Task.Delay(TimeSpan.FromSeconds(10))) != worker.Exited) return false;
+		return worker.ExitCode == 0 && !worker.Killed;
 	}
 
 	// IIS's answer when the application pool can't serve: 503.

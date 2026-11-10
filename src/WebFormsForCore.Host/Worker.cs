@@ -144,8 +144,12 @@ sealed class Worker : IDisposable
 		catch (Exception e) when (e is IOException || e is InvalidOperationException) { }
 	}
 
+	// The host killed it (a worker that kept running past its limit).
+	public bool Killed { get; private set; }
+
 	public void Kill()
 	{
+		Killed = true;
 		try { Process?.Kill(entireProcessTree: true); }
 		catch (Exception e) when (e is InvalidOperationException || e is System.ComponentModel.Win32Exception) { }
 	}

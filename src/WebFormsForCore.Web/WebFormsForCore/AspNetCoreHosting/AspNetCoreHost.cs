@@ -223,6 +223,11 @@ namespace System.Web.Hosting
             Unregister();
         }
 
+        // webForCore: the runtime has completed the request's response (AspNetCoreWorkerRequest.Process): AbortRequests leaves
+        // it to Kestrel to finish sending. Aborting it reset a response the host was still reading, so the client's
+        // connection was reset, for a request the application had processed (#214).
+        internal void RequestCompleted(Core.HttpContext context) => requests.TryRemove(context, out _);
+
         // webForCore: aborts the requests still in progress once HttpRuntime.Dispose has waited for them, where .NET
         // Framework unloaded the AppDomain (#181).
         internal void AbortRequests()
