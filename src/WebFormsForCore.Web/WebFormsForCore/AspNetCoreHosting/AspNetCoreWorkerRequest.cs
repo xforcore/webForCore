@@ -678,7 +678,9 @@ namespace System.Web.Hosting
 #if DebugWF4C
 				Debug.WriteLine($"Request {Context.Request.Path} finished");
 #endif
-				// webForCore: the runtime is done with the request; a WebSocket or a file transfer runs on (#214).
+				// webForCore: the runtime is done with the request (#214): the worker no longer aborts it when it stops, and
+				// the drain no longer waits for it. An accepted WebSocket or a file transfer runs on, and is aborted then.
+				if (pendingWebSocket == null && pendingTransfer == null) Host.RequestCompleted(Context);
 				(Context.Items[ReleaseRuntimeCountKey] as Action)?.Invoke();
 				if (pendingWebSocket != null) await RunWebSocket();
 				else if (pendingTransfer != null) await RunTransfer();

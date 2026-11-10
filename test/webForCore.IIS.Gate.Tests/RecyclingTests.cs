@@ -157,7 +157,8 @@ namespace IISGate
             stop.Cancel();
             await Task.WhenAll(load);
             Assert.True(answered > 10, $"{answered} requests");
-            Assert.True(others.IsEmpty, $"{others.Count} of {answered} requests weren't answered 200:\n{string.Join("\n", others)}\nThe host's output:\n{OutputTail()}");
+            if (!others.IsEmpty) File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "recycling-host-output.txt"), _server.Output);
+            Assert.True(others.IsEmpty, $"{others.Count} of {answered} requests weren't answered 200:\n{string.Join("\n", others)}\nThe host's output is in recycling-host-output.txt beside the test assembly.");
         }
 
         // A WebSocket open across a restart is aborted once the application's registered objects have stopped, without
