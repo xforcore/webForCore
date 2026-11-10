@@ -52,7 +52,15 @@ namespace WebFormsForCore.Hosting
 		internal const string SchemeHeader = "X-WebForCore-Scheme";
 		internal const string ClientCertificateHeader = "X-WebForCore-Client-Certificate";
 		internal const string TlsHeader = "X-WebForCore-Tls";
+		// #214: the host added "Expect: 100-continue", so that it sends the body only when the application reads it. Kestrel
+		// looks for it in the request's headers when the application first reads the body, to send 100 Continue, so it
+		// stays there; the worker request hides it from System.Web (HostAddedExpectKey), as the client didn't send it.
+		internal const string ExpectHeader = "X-WebForCore-Expect";
+		internal const string HostAddedExpectKey = "webForCore.HostAddedExpect";
 		internal const string RestartingHeader = "X-WebForCore-Restarting";
+		// #219: response header with which the worker asks the host to close the client's connection after the response
+		// (Connection: close), where IIS closes it; the connection between the worker and the host stays open.
+		internal const string CloseHeader = "X-WebForCore-Close";
 
 		static readonly string socketPath = Variable(SocketVariable);
 		static readonly string id = Variable(IdVariable);
@@ -124,6 +132,24 @@ namespace WebFormsForCore.Hosting
 			}
 		}
 
+		// #219: the client's connection closes after this response, as IIS closes it after request filtering's rejections
+		// (whatever page httpErrors then sends) and after ASP.NET's error for a body over maxRequestLength. In a worker the
+		// host closes it (CloseHeader), and the worker's connection to the host, which its pool reuses, stays open; run on its
+		// own, the application says Connection: close itself. Set when the response starts, so that a response httpErrors
+		// replaces keeps it.
+		internal static void CloseClientConnection(HttpContext context)
+		{
+			var response = context.Response;
+			if (response.HasStarted || context.Items.ContainsKey(CloseHeader)) return;
+			context.Items[CloseHeader] = true;
+			response.OnStarting(() =>
+			{
+				if (IsWorker) response.Headers[CloseHeader] = "1";
+				else response.Headers.Connection = "close";
+				return Task.CompletedTask;
+			});
+		}
+
 		// The host's connection details, before any of the application's middleware.
 		sealed class WorkerStartupFilter : IStartupFilter
 		{
@@ -175,7 +201,8 @@ namespace WebFormsForCore.Hosting
 					&& int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var strength))
 					context.Features.Set<ITlsHandshakeFeature>(new ForwardedTlsHandshake((SslProtocols)protocol, strength));
 			}
-			foreach (var name in new[] { RemoteHeader, LocalHeader, SchemeHeader, ClientCertificateHeader, TlsHeader }) headers.Remove(name);
+			if (!string.IsNullOrEmpty(headers[ExpectHeader])) context.Items[HostAddedExpectKey] = true;
+			foreach (var name in new[] { RemoteHeader, LocalHeader, SchemeHeader, ClientCertificateHeader, TlsHeader, ExpectHeader }) headers.Remove(name);
 			return next();
 		}
 

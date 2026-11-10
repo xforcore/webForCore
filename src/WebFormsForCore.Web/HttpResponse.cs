@@ -1328,6 +1328,11 @@ namespace System.Web {
                     }
 
                     if (_closeConnectionAfterError) {
+#if !NETFRAMEWORK
+                        // webForCore: IIS closes the client's connection after this error page; the worker request has
+                        // webforcore-host close it, which the page must say before it is flushed (#219).
+                        (_wr as AspNetCoreWorkerRequest)?.CloseClientConnectionAfterResponse();
+#endif
                         Flush();
                         Close();
                     }

@@ -9,12 +9,18 @@ namespace WebFormsForCore.Host;
 // How a request goes to a worker: as the client sent it (its request target and Host header unchanged, no headers added
 // by the proxy), plus the connection details the worker can't see itself (WorkerProtocol). A worker that is shutting
 // down answers 503 with WorkerProtocol.RestartingHeader without processing the request; when the request can be sent
-// again (it has no body), that response isn't passed on, and the pool sends the request to the next worker.
+// again (RequestBody: it has no body, or the host still has all of it), that response isn't passed on, and the pool
+// sends the request to the next worker.
 sealed class WorkerTransformer : HttpTransformer
 {
 	readonly bool canRetry;
+	readonly RequestBody body;
 
-	public WorkerTransformer(bool canRetry) => this.canRetry = canRetry;
+	public WorkerTransformer(bool canRetry, RequestBody body)
+	{
+		this.canRetry = canRetry;
+		this.body = body;
+	}
 
 	// The worker was shutting down and didn't take the request; nothing was sent to the client.
 	public bool WorkerRestarting { get; private set; }
@@ -45,17 +51,30 @@ sealed class WorkerTransformer : HttpTransformer
 				+ tls.CipherStrength.ToString(CultureInfo.InvariantCulture));
 #pragma warning restore SYSLIB0058
 		}
+		// #214: a large body waits until the application reads it, unless the client asked for that itself.
+		if (body.ExpectContinue && proxyRequest.Headers.ExpectContinue != true)
+		{
+			proxyRequest.Headers.ExpectContinue = true;
+			Add(proxyRequest, WorkerProtocol.ExpectHeader, "1");
+		}
 	}
 
-	public override ValueTask<bool> TransformResponseAsync(HttpContext context, HttpResponseMessage? proxyResponse, CancellationToken cancellationToken)
+	public override async ValueTask<bool> TransformResponseAsync(HttpContext context, HttpResponseMessage? proxyResponse, CancellationToken cancellationToken)
 	{
-		if (canRetry && proxyResponse is { StatusCode: HttpStatusCode.ServiceUnavailable }
+		if (canRetry && body.CanSendAgain && proxyResponse is { StatusCode: HttpStatusCode.ServiceUnavailable }
 			&& proxyResponse.Headers.Contains(WorkerProtocol.RestartingHeader))
 		{
 			WorkerRestarting = true;
-			return new ValueTask<bool>(false); // nothing copied: the pool sends the request again
+			return false; // nothing copied: the pool sends the request again
 		}
-		return base.TransformResponseAsync(context, proxyResponse, cancellationToken);
+		if (!await base.TransformResponseAsync(context, proxyResponse, cancellationToken)) return false;
+		// #219: the worker asks for the client's connection to be closed after the response, where IIS closes it (request
+		// filtering's rejections, ASP.NET's error for a body over maxRequestLength). The worker's own connection stays open
+		// for the next request. HTTP/2 and HTTP/3 have no Connection header.
+		if (context.Response.Headers.Remove(WorkerProtocol.CloseHeader)
+			&& (HttpProtocol.IsHttp11(context.Request.Protocol) || HttpProtocol.IsHttp10(context.Request.Protocol)))
+			context.Response.Headers.Connection = "close";
+		return true;
 	}
 
 	static string Endpoint(IPAddress? address, int port) =>

@@ -39,6 +39,11 @@ sealed class Worker : IDisposable
 			UseCookies = false,
 			ActivityHeadersPropagator = DistributedContextPropagator.CreateNoOutputPropagator(),
 			ConnectTimeout = TimeSpan.FromSeconds(15),
+			// #214: a large body goes to the worker only once its application reads it (RequestBody sends
+			// "Expect: 100-continue"), however long that takes, so that a request the worker turns away while it shuts
+			// down can go to the next worker with its body. A final response that comes first (the application didn't
+			// read the body) ends the wait; from 300 on, a large body isn't sent and the connection isn't reused.
+			Expect100ContinueTimeout = Timeout.InfiniteTimeSpan,
 			ConnectCallback = async (_, cancellationToken) =>
 			{
 				var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
@@ -139,8 +144,12 @@ sealed class Worker : IDisposable
 		catch (Exception e) when (e is IOException || e is InvalidOperationException) { }
 	}
 
+	// The host killed it (a worker that kept running past its limit).
+	public bool Killed { get; private set; }
+
 	public void Kill()
 	{
+		Killed = true;
 		try { Process?.Kill(entireProcessTree: true); }
 		catch (Exception e) when (e is InvalidOperationException || e is System.ComponentModel.Win32Exception) { }
 	}

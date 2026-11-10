@@ -117,6 +117,10 @@ namespace System.Web.Hosting
 			Context = context;
 		}
 
+		// webForCore: WebFormsMiddleware counts the request as one of HttpRuntime's active requests from before its check that
+		// the application is still running until the runtime has completed the response (#214).
+		internal const string ReleaseRuntimeCountKey = "webForCore.ReleaseRuntimeCount";
+
 		// webForCore: IIS's fTrySkipCustomErrors, for the httpErrors module (IIS/IISModules.cs) in the hosting layer.
 		public const string TrySkipIisCustomErrorsKey = "webForCore.TrySkipIisCustomErrors";
 		internal override bool TrySkipIisCustomErrors
@@ -125,13 +129,18 @@ namespace System.Web.Hosting
 			set { Context.Items[TrySkipIisCustomErrorsKey] = value; }
 		}
 
+		// webForCore: the client's connection closes after the response (ASP.NET's error page for a body over maxRequestLength,
+		// HttpResponse.CloseConnectionAfterError), as on IIS, with the connection to webforcore-host kept open (#219).
+		internal void CloseClientConnectionAfterResponse() => WebFormsForCore.Hosting.WorkerProcess.CloseClientConnection(Context);
+
 		// webForCore: the connection closes after the response, with "Connection: close" when the response hasn't started,
 		// so that the other side knows. Under webforcore-host, once the response has started (ASP.NET's error for a body over
 		// maxRequestLength flushes its error page, then closes, without reading the body), the connection stays open and
 		// Kestrel drains the unread body, as for any request. Closed after a response that didn't say so, it was a connection
 		// the host's pool sent its next request on, and that request's client was reset now and then
-		// (ErrorsAndLimitsTests.LimitStatusIsIISs on Windows). The connection is the host's, not the client's, which the host
-		// kept open either way. Run on its own, the application closes the client's connection as before.
+		// (ErrorsAndLimitsTests.LimitStatusIsIISs on Windows). The connection is the host's, not the client's; the host
+		// closes the client's after that error page (CloseClientConnectionAfterResponse, #219). Run on its own, the application
+		// closes the client's connection as before.
 		public override void CloseConnection()
 		{
 			if (Context.Response.HasStarted)
@@ -669,6 +678,10 @@ namespace System.Web.Hosting
 #if DebugWF4C
 				Debug.WriteLine($"Request {Context.Request.Path} finished");
 #endif
+				// webForCore: the runtime is done with the request (#214): the worker no longer aborts it when it stops, and
+				// the drain no longer waits for it. An accepted WebSocket or a file transfer runs on, and is aborted then.
+				if (pendingWebSocket == null && pendingTransfer == null) Host.RequestCompleted(Context);
+				(Context.Items[ReleaseRuntimeCountKey] as Action)?.Invoke();
 				if (pendingWebSocket != null) await RunWebSocket();
 				else if (pendingTransfer != null) await RunTransfer();
 			}
@@ -959,11 +972,13 @@ namespace System.Web.Hosting
 
 			// construct unknown headers as array list of name1,value1,...
 			var headers = new List<string>();
-
+			// webForCore: not the "Expect: 100-continue" webforcore-host added (WorkerProcess.ExpectHeader, #214).
+			bool hostAddedExpect = Context.Items.ContainsKey(WebFormsForCore.Hosting.WorkerProcess.HostAddedExpectKey);
 
 			foreach (var header in Context.Request.Headers)
 			{
 				string name = header.Key;
+				if (hostAddedExpect && string.Equals(name, "Expect", StringComparison.OrdinalIgnoreCase)) continue;
 				var strValues = header.Value;
 				string str;
 				switch (strValues.Count)

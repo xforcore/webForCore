@@ -314,26 +314,51 @@ namespace Microsoft.AspNetCore.Builder
 
 		async Task InvokeApplication(Core.HttpContext context)
 		{
-			if (Volatile.Read(ref app.Retired) != 0)
+			// webForCore: the request counts as one of the runtime's (HttpRuntime's active requests) before the check that
+			// the application is still running, and until its response is complete (#214). HttpRuntime.Dispose drains the
+			// requests only after Retired is set, so either the request sees Retired and goes to the next worker, or the
+			// drain waits for it. It used to be counted only once it reached HttpRuntime.ProcessRequestInternal, after a
+			// thread hop: a request in that gap when the drain found none running got "Server Too Busy" (#209), or was
+			// aborted with the requests still in progress when the worker stopped (AbortRequests), and one whose response
+			// was still being completed was aborted too. The count ends once the runtime has completed the response
+			// (AspNetCoreWorkerRequest.Process): an accepted WebSocket runs on after that, and is aborted when the worker
+			// stops, as on IIS.
+			int released = 0;
+			void Release()
 			{
-				// The application is shutting down: the request goes to the next worker (the host sends it again when it has
-				// no body), as IIS sent new requests to the new process during a recycle.
-				context.Response.StatusCode = Core.StatusCodes.Status503ServiceUnavailable;
-				context.Response.Headers[WorkerProcess.RestartingHeader] = "1";
-				context.Response.Headers.RetryAfter = "1";
-				return;
+				if (Interlocked.Exchange(ref released, 1) == 0) HttpRuntime.DecrementActivePipelineCount();
 			}
-			if (app.IsLegacyRequest(context))
+			HttpRuntime.IncrementActivePipelineCount();
+			context.Items[AspNetCoreWorkerRequest.ReleaseRuntimeCountKey] = (Action)Release;
+			try
 			{
-				AllowSynchronousIO(context);
-				var requests = Interlocked.Increment(ref app.Requests);
-				await app.ProcessRequest(context);
-				if (Recycling.Requests > 0 && requests == Recycling.Requests)
-					Recycle(app, $"{requests} requests");
+				if (Volatile.Read(ref app.Retired) != 0)
+				{
+					// The application is shutting down: the request goes to the next worker (the host sends it again, with
+					// its body, #214), as IIS sent new requests to the new process during a recycle.
+					context.Response.StatusCode = Core.StatusCodes.Status503ServiceUnavailable;
+					context.Response.Headers[WorkerProcess.RestartingHeader] = "1";
+					context.Response.Headers.RetryAfter = "1";
+					return;
+				}
+				if (app.IsLegacyRequest(context))
+				{
+					AllowSynchronousIO(context);
+					var requests = Interlocked.Increment(ref app.Requests);
+					await app.ProcessRequest(context);
+					if (Recycling.Requests > 0 && requests == Recycling.Requests)
+						Recycle(app, $"{requests} requests");
+				}
+				else
+				{
+					// ASP.NET Core's own middleware, not the runtime's: the drain doesn't wait for it.
+					Release();
+					await next.Invoke(context);
+				}
 			}
-			else
+			finally
 			{
-				await next.Invoke(context);
+				Release();
 			}
 		}
 

@@ -18,11 +18,17 @@ static class WorkerProtocol
 	public const string SchemeHeader = "X-WebForCore-Scheme";          // http or https
 	public const string ClientCertificateHeader = "X-WebForCore-Client-Certificate"; // DER, base64
 	public const string TlsHeader = "X-WebForCore-Tls";                // "<SslProtocols>;<cipher strength>"
-	public static readonly string[] RequestHeaders = [RemoteHeader, LocalHeader, SchemeHeader, ClientCertificateHeader, TlsHeader];
+	// #214: the host added "Expect: 100-continue" (RequestBody); the worker hides it from the application, which the
+	// client didn't send it to.
+	public const string ExpectHeader = "X-WebForCore-Expect";
+	public static readonly string[] RequestHeaders = [RemoteHeader, LocalHeader, SchemeHeader, ClientCertificateHeader, TlsHeader, ExpectHeader];
 
 	// Response header of a worker that is shutting down and didn't process the request (with 503): the host can send
-	// the request to the next worker if it has no body.
+	// the request to the next worker (RequestBody).
 	public const string RestartingHeader = "X-WebForCore-Restarting";
+	// #219: response header of a worker that asks for the client's connection to be closed after the response, as IIS
+	// closes it; the host sends Connection: close in its place.
+	public const string CloseHeader = "X-WebForCore-Close";
 
 	// Control messages, one line each, worker to host: "<token> ready <id> <virtual path>" once the worker serves (the
 	// initialization pages are under the application's path, #190), and

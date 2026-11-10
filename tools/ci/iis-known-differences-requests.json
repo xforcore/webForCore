@@ -1,36 +1,31 @@
 [
   {
-    "requests": "^GET /errors/iis-hidden(-moved)?/App_Data/",
-    "field": "header Connection",
-    "reason": "A request filtering rejection (a hidden segment) answered by <httpErrors> ExecuteURL: IIS 10 closes the connection (Connection: close); webForCore keeps it open (#219). Status and body are the same."
-  },
-  {
     "requests": ".*",
     "field": "header Server",
     "reason": "IIS sends Server: Microsoft-IIS/10.0; webForCore's host is Kestrel."
   },
   {
-    "requests": "(?i)^GET /content/.*\\.(txt|htm)$",
+    "requests": "(?i)^GET /(content/.*\\.(txt|htm)|errors/filtering(-custom)?/data\\.txt)$",
     "field": "header Accept-Ranges",
     "reason": "A static file is served by ASP.NET's static file handler (IIS: its static file module), which sends no Accept-Ranges: bytes."
   },
   {
-    "requests": "(?i)^GET /content/.*\\.(txt|htm)$",
+    "requests": "(?i)^GET /(content/.*\\.(txt|htm)|errors/filtering(-custom)?/data\\.txt)$",
     "field": "header Cache-Control",
     "reason": "A static file is served by ASP.NET's static file handler (IIS: its static file module), which sends Cache-Control: public."
   },
   {
-    "requests": "(?i)^GET /content/.*\\.(txt|htm)$",
+    "requests": "(?i)^GET /(content/.*\\.(txt|htm)|errors/filtering(-custom)?/data\\.txt)$",
     "field": "header ETag",
     "reason": "A static file is served by ASP.NET's static file handler (IIS: its static file module), whose ETag has another form."
   },
   {
-    "requests": "(?i)^GET /content/.*\\.(txt|htm)$",
+    "requests": "(?i)^GET /(content/.*\\.(txt|htm)|errors/filtering(-custom)?/data\\.txt)$",
     "field": "header Last-Modified",
     "reason": "A static file is served by ASP.NET's static file handler (IIS: its static file module), whose Last-Modified the worker request leaves out (as Cassini, which it comes from, did)."
   },
   {
-    "requests": "(?i)^GET /(content/.*\\.(txt|htm)|About%20x)$",
+    "requests": "(?i)^GET /(content/.*\\.(txt|htm)|About%20x|errors/filtering(-custom)?/data\\.txt)$",
     "field": "header X-AspNet-Version",
     "reason": "A static file, or a 404 for one, is ASP.NET's (IIS: its static file module's), so it has X-AspNet-Version."
   },
@@ -55,11 +50,6 @@
     "reason": "IIS's detailed error page for request filtering's 404.11 has Cache-Control: private; webForCore's has none."
   },
   {
-    "requests": "^GET /Echo\\.aspx/a(%2525|\\+|%2B)b$",
-    "field": "header Connection",
-    "reason": "IIS closes the connection after request filtering's 404.11; webForCore keeps it open."
-  },
-  {
     "requests": "^GET /Echo\\.aspx/a(%25|%26|%3F|%3A|:|%3C|\\*)b$",
     "field": "body",
     "reason": "ASP.NET's 400 for a character of requestPathInvalidCharacters is the same error page, with webForCore's source file, line, stack frames (from its PDBs) and version information instead of .NET Framework's."
@@ -73,11 +63,6 @@
     "requests": "^GET /errors/nodefault/(Throw|Http404)\\.aspx$",
     "field": "body",
     "reason": "ASP.NET's generic Runtime Error page (customErrors On without a defaultRedirect) shows its sample Web.config with the platform's newlines (\\n on Linux), as webForCore's product output has them (IIS-COMPATIBILITY.md, Compatibility decisions) (#192)."
-  },
-  {
-    "requests": "^POST /limits/app/(Form\\.ashx \\(form, (8193|16384) bytes\\)|(Files|Input|Page)\\.(ashx|aspx) \\((multipart|raw|form), 8193 bytes\\))$",
-    "field": "header Connection",
-    "reason": "Over maxRequestLength, ASP.NET flushes its error page and closes the connection (HttpResponse.CloseConnectionAfterError): IIS sends it without a length and Connection: close; webForCore's host sends it chunked and keeps the connection. Same status and page (#192)."
   },
   {
     "requests": "^POST /limits/app/(Form\\.ashx \\(form, (8193|16384) bytes\\)|(Files|Input|Page)\\.(ashx|aspx) \\((multipart|raw|form), 8193 bytes\\))$",
@@ -98,11 +83,6 @@
     "requests": "^POST /limits/(app/Form\\.ashx \\(form, 16385 bytes\\)|iis/(Form|Files|Ignore)\\.ashx \\((form|multipart), 8193 bytes\\))$",
     "field": "header Cache-Control",
     "reason": "IIS's detailed error page for request filtering's 413.1 has Cache-Control: private; webForCore's has none (#192)."
-  },
-  {
-    "requests": "^POST /limits/(app/Form\\.ashx \\(form, 16385 bytes\\)|iis/(Form|Files|Ignore)\\.ashx \\((form|multipart), 8193 bytes\\))$",
-    "field": "header Connection",
-    "reason": "IIS closes the connection after request filtering's 413.1; webForCore keeps it open (#192)."
   },
   {
     "requests": "^GET /errors/iis-(auto|replace|on)/(Throw|Status500|Status500Skip)\\.aspx$",
@@ -153,5 +133,25 @@
     "requests": "^GET /errors/(on|rewrite)/Missing\\.aspx$",
     "field": "header X-AspNet-Version",
     "reason": "customErrors' answer for a page that doesn't exist (an error before any handler ran) has no X-AspNet-Version or default Cache-Control: private, as in IIS's integrated pipeline, whose rule webForCore follows; IIS's classic pipeline adds them to every ASP.NET response (#192)."
+  },
+  {
+    "requests": "^(GET|DELETE|POST) /errors/filtering/(?!data\\.txt$)",
+    "field": "body",
+    "reason": "Request filtering's rejections (404.5, 404.6, 404.7, 404.8, 404.11, 404.14, 404.15, 404.18, 431.0 and 413.1) and the MIME map's 404.3 are webForCore's short IIS error page; IIS sends its detailed error page. Same status and substatus (#219)."
+  },
+  {
+    "requests": "^(GET|DELETE|POST) /errors/filtering/(?!data\\.txt$)",
+    "field": "header Content-Type",
+    "reason": "webForCore's short IIS error page is text/html; IIS's detailed error page is text/html; charset=utf-8 (#219)."
+  },
+  {
+    "requests": "^(GET|DELETE|POST) /errors/filtering/(?!data\\.txt$)",
+    "field": "header Cache-Control",
+    "reason": "IIS's detailed error page has Cache-Control: private; webForCore's short one has none (#219)."
+  },
+  {
+    "requests": "^GET /errors/filtering-custom/data\\.txt \\(X-Big\\)$",
+    "field": "body",
+    "reason": "Request filtering's 431.0 with <httpErrors errorMode=\"Custom\"> and no page for 431: IIS sends its own static 431 page, webForCore its short IIS error page. Same status (#219)."
   }
 ]

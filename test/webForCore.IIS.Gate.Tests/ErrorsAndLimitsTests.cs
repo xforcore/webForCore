@@ -138,6 +138,55 @@ namespace IISGate
             Assert.Contains("<title>Object moved</title>", body);
         }
 
+        // #219: request filtering's rejections and the MIME map's 404.3, answered by IIS's error page (errors/filtering) and
+        // by an httpErrors ExecuteURL page (errors/filtering-custom, 200 from IisError.aspx), and two requests that aren't
+        // rejected. Close: whether the client's connection closes after the response (Connection: close).
+        public static readonly TheoryData<string, string, int, int, bool> FilteringRequests = new TheoryData<string, string, int, int, bool>
+        {
+            // method, path, status (filtering), status (filtering-custom), the connection closes
+            { "GET", "blocked.txt", 404, 200, true },                        // 404.5 denyUrlSequences
+            { "DELETE", "Page.aspx", 404, 200, true },                       // 404.6 verbs
+            { "GET", "file.forbidden", 404, 200, true },                     // 404.7 fileExtensions
+            { "GET", "App_Data/data.txt", 404, 200, true },                  // 404.8 hiddenSegments
+            { "GET", "data.txt (X-Big)", 431, 431, true },                   // 431.0 headerLimits (IIS 7 to 8.5: 404.10)
+            { "GET", "a%2525b.txt", 404, 200, true },                        // 404.11 double escaping
+            { "GET", "data.txt?q=" + new string('q', 60), 404, 200, true },  // 404.15 maxQueryString
+            { "GET", new string('l', 200) + ".txt", 404, 200, true },        // 404.14 maxUrl
+            { "GET", "data.txt?x=blockedq", 404, 200, true },                // 404.18 denyQueryStringSequences
+            { "POST", "Page.aspx (200 bytes)", 413, 200, true },             // 413.1 maxAllowedContentLength
+            { "GET", "file.unknownext", 404, 200, false },                   // 404.3 the MIME map
+            { "GET", "data.txt", 200, 200, false },
+        };
+
+        [Theory]
+        [MemberData(nameof(FilteringRequests))]
+        public async Task FilteringRejectionsAreIISs(string method, string request, int status, int customStatus, bool close)
+        {
+            foreach (var (folder, expected) in new[] { ("filtering", status), ("filtering-custom", customStatus) })
+            {
+                string path = "/errors/" + folder + "/" + request;
+                HttpContent content = null;
+                string requestBody = null, contentType = null;
+                Dictionary<string, string> headers = null;
+                if (path.EndsWith(" (X-Big)"))
+                {
+                    path = path[..^" (X-Big)".Length];
+                    headers = new Dictionary<string, string> { ["X-Big"] = new string('b', 20) };
+                }
+                if (path.EndsWith(" (200 bytes)"))
+                {
+                    path = path[..^" (200 bytes)".Length];
+                    requestBody = "a=" + new string('x', 198);
+                    contentType = "application/x-www-form-urlencoded";
+                    content = new StringContent(requestBody, Encoding.ASCII);
+                    content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+                }
+                var (response, _) = await Send(new HttpMethod(method), path, content, $"{method} /errors/{folder}/{request}", requestBody, contentType, headers: headers);
+                Assert.True(expected == (int)response.StatusCode, $"{method} {path}: {(int)response.StatusCode}");
+                Assert.True(close == (response.Headers.ConnectionClose == true), $"{method} {path}: Connection: {string.Join(", ", response.Headers.Connection)}");
+            }
+        }
+
         // The detailed error page (RemoteOnly for a local request, and Off), and the generic one (On, no defaultRedirect).
         [Fact]
         public async Task TheErrorPagesAreASPNETs()
@@ -351,12 +400,13 @@ namespace IISGate
         }
 
         private async Task<(HttpResponseMessage Response, string Body)> Send(HttpMethod method, string path, HttpContent content = null,
-            string key = null, string requestBody = null, string contentType = null, int repeat = 1)
+            string key = null, string requestBody = null, string contentType = null, int repeat = 1, Dictionary<string, string> headers = null)
         {
             var request = new HttpRequestMessage(method, new Uri(_server.BaseAddress.GetLeftPart(UriPartial.Authority) + path)) { Content = content };
+            if (headers != null) foreach (var (name, value) in headers) request.Headers.TryAddWithoutValidation(name, value);
             var response = await _server.Client.SendAsync(request);
             var body = await response.Content.ReadAsStringAsync();
-            RequestHandlingTests.Record(key ?? method.Method + " " + path, response, body, null, requestBody, contentType, repeat);
+            RequestHandlingTests.Record(key ?? method.Method + " " + path, response, body, headers, requestBody, contentType, repeat);
             return (response, body);
         }
     }

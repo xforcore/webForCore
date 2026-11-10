@@ -120,7 +120,16 @@ commit that made it, and its issue, say why.
   aborted them after its own 30 s.
   The request `HttpRuntime.ProcessRequestInternal` turns away once `Dispose` has drained ("Server Too Busy", 503: it
   reached the old worker before the application began shutting down, and the runtime only after the drain) carries
-  the worker's restarting header, so that webforcore-host sends it to the next worker when it has no body (#209).
+  the worker's restarting header, so that webforcore-host sends it to the next worker (#209), with its body: the
+  host reads a small body ahead, and has the worker's Kestrel ask for a larger one (`Expect: 100-continue`), which
+  `AspNetCoreWorkerRequest.ParseHeaders` hides from System.Web (#214). `WebFormsMiddleware` counts a request among
+  `HttpRuntime`'s active requests (`IncrementActivePipelineCount`) before it checks that the application is still
+  running, until the runtime has completed its response, so that the drain can't miss a request between the two (#214).
+  `AspNetCoreHost.AbortRequests` leaves a request whose response the runtime has completed to Kestrel (#214).
+  `HttpResponse.WriteErrorMessage`, before it flushes the error page it closes the connection after
+  (`CloseConnectionAfterError`: a body over `maxRequestLength`), asks the worker request to have the client's
+  connection closed, as IIS closes it (`Connection: close`, from webforcore-host, which keeps its connection to the
+  worker); request filtering's rejections (`IIS/IISModules.cs`) do the same (#219).
   `AspNetCoreWorkerRequest.CloseConnection` sends `Connection: close` when the response hasn't started. In a worker of
   webforcore-host, once the response has started, it leaves the connection to the host open (Kestrel drains the
   unread body): a close the response didn't announce reset the next request the host's pool sent on that connection.

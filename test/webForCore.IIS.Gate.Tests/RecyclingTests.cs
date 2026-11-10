@@ -25,8 +25,8 @@ namespace IISGate
         private async Task<Start> Current()
         {
             var response = await _server.Client.GetAsync("/Domain.aspx");
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, $"{(int)response.StatusCode} {body}\nThe host's output:\n{OutputTail()}");
             var match = Regex.Match(body, @"domain=([0-9a-f-]+);starts=(\d+);process=(\d+)");
             Assert.True(match.Success, body);
             return new Start(match.Groups[1].Value, int.Parse(match.Groups[2].Value), int.Parse(match.Groups[3].Value));
@@ -89,21 +89,60 @@ namespace IISGate
             await AllAnsweredDuringRestarts(clients: 16, restarts: 5);
         }
 
-        private async Task AllAnsweredDuringRestarts(int clients, int restarts)
+        // #214: the same with requests that have a body, form POSTs and raw PUTs, each of which must reach the application
+        // with its body. One that reached the old worker as its application began shutting down got 503 ("Server Too
+        // Busy", or the worker's own answer while it shut down), because webforcore-host had sent its body on and couldn't
+        // send the request again; on IIS http.sys queues it and the next worker serves it.
+        [Fact]
+        public async Task RequestsWithBodiesDuringRepeatedRestartsUnderLoadAreAllAnswered()
+        {
+            await AllAnsweredDuringRestarts(clients: 16, restarts: 5, withBodies: true);
+        }
+
+        private async Task AllAnsweredDuringRestarts(int clients, int restarts, bool withBodies = false)
         {
             using var stop = new CancellationTokenSource();
             int answered = 0;
             var others = new System.Collections.Concurrent.ConcurrentQueue<string>();
-            var load = Enumerable.Range(0, clients).Select(_ => Task.Run(async () =>
+            var load = Enumerable.Range(0, clients).Select(client => Task.Run(async () =>
             {
-                while (!stop.IsCancellationRequested)
+                for (int n = 0; !stop.IsCancellationRequested; n++)
                 {
-                    using var response = await _server.Client.GetAsync("/Domain.aspx");
-                    Interlocked.Increment(ref answered);
-                    if (response.StatusCode != HttpStatusCode.OK)
+                    HttpResponseMessage response;
+                    string sent = null, what = "GET";
+                    try
                     {
+                        if (!withBodies) response = await _server.Client.GetAsync("/Domain.aspx");
+                        else
+                        {
+                            // Small bodies, bodies the host keeps in memory until the request is answered (up to 49,152 bytes)
+                            // and larger ones, which it sends only when the application reads them; and bodies of unknown
+                            // length (chunked).
+                            sent = $"{client}-{n}-" + new string((char)('a' + n % 26), (n % 3) switch { 0 => 200, 1 => 20000, _ => 100000 });
+                            HttpContent content = client % 2 == 0
+                                ? new FormUrlEncodedContent(new Dictionary<string, string> { ["data"] = sent })
+                                : new StringContent(sent, Encoding.UTF8, "text/plain");
+                            using var request = new HttpRequestMessage(client % 2 == 0 ? HttpMethod.Post : HttpMethod.Put, "/Posted.aspx") { Content = content };
+                            if (n % 4 == 3) request.Headers.TransferEncodingChunked = true;
+                            what = $"{request.Method} of {sent.Length} characters{(n % 4 == 3 ? ", chunked" : "")}";
+                            response = await _server.Client.SendAsync(request);
+                        }
+                    }
+                    catch (HttpRequestException e)
+                    {
+                        // The client's connection was reset or closed without an answer.
+                        Interlocked.Increment(ref answered);
+                        others.Enqueue($"{DateTime.UtcNow:HH:mm:ss.fff} {what}: {e.GetBaseException().Message}");
+                        continue;
+                    }
+                    using (response)
+                    {
+                        Interlocked.Increment(ref answered);
                         var body = await response.Content.ReadAsStringAsync();
-                        others.Enqueue($"{DateTime.UtcNow:HH:mm:ss.fff} {(int)response.StatusCode} {(body.Length > 300 ? body[..300] : body)}");
+                        if (response.StatusCode != HttpStatusCode.OK)
+                            others.Enqueue($"{DateTime.UtcNow:HH:mm:ss.fff} {response.RequestMessage.Method} {(int)response.StatusCode} {string.Join(", ", response.Headers.Select(h => h.Key))} {(body.Length > 300 ? body[..300] : body)}");
+                        else if (sent != null && !body.Contains($";body={sent};expect=;"))
+                            others.Enqueue($"{DateTime.UtcNow:HH:mm:ss.fff} {response.RequestMessage.Method} 200 without the body sent, or with an Expect header it didn't send: {(body.Length > 300 ? body[..300] : body)}");
                     }
                 }
             })).ToArray();
@@ -118,7 +157,8 @@ namespace IISGate
             stop.Cancel();
             await Task.WhenAll(load);
             Assert.True(answered > 10, $"{answered} requests");
-            Assert.True(others.IsEmpty, $"{others.Count} of {answered} requests weren't answered 200:\n{string.Join("\n", others)}\nThe host's output:\n{OutputTail()}");
+            if (!others.IsEmpty) File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "recycling-host-output.txt"), _server.Output);
+            Assert.True(others.IsEmpty, $"{others.Count} of {answered} requests weren't answered 200:\n{string.Join("\n", others)}\nThe host's output is in recycling-host-output.txt beside the test assembly.");
         }
 
         // A WebSocket open across a restart is aborted once the application's registered objects have stopped, without
